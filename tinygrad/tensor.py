@@ -1756,6 +1756,21 @@ class Tensor:
     m = self.max(axis=axis, keepdim=True)
     return (self - m).exp().sum(axis=axis, keepdim=keepdim).log() + m.squeeze(axis)
 
+  def _cummax(self, axis=0, _first_zero=False) -> Tensor:
+      assert self.shape[axis] != 0
+      pl_sz = self.shape[axis] - int(not _first_zero)
+      return self.transpose(axis,-1).pad2d((pl_sz,-int(_first_zero)), value=-float("inf"))._pool((self.shape[axis],)).max(-1).transpose(axis,-1)    
+  def cummax(self, axis=0) -> Tensor:
+    axis = self._resolve_dim(axis)
+    if self.ndim == 0 or 0 in self.shape: return self
+    SPLIT=256
+    if not isinstance(s:=self.shape[axis], int) or s <= SPLIT*2:  return self._cummax( axis)
+    ret = self.transpose(axis,-1).pad2d((round_up(s,SPLIT)-s, 0), value=-float("inf")).unflatten(-1,(-1,SPLIT))._cummax(axis)
+    base_max = ret[...,-1]._cummax(-1,_first_zero=True)
+    base_max = base_max.unsqueeze(-1).expand(*base_max.shape, ret.shape[-1]) 
+    def fix(x:Tensor): return x.flatten(start_dim=-2)[...,-s:].transpose(axis,-1)
+    return fix(ret).maximum(fix(base_max))
+
   def logcumsumexp(self, axis=0):
     """
     Computes the log-cumsum-exp of the tensor along the specified axis or axes.
@@ -1780,8 +1795,18 @@ class Tensor:
     print(t.logcumsumexp(axis=1).numpy())
     ```
     """
-    m = self.max(axis=axis, keepdim=True)
-    return (self - m).exp().cumsum(axis=axis).log() + m
+    axis = self._resolve_dim(axis)
+    if self.ndim == 0 or 0 in self.shape: return self
+    x = self.transpose(axis,-1)
+    initial_shape, last_dim = x.shape,x.shape[-1]
+    x = x.reshape(-1,last_dim)
+    d1,d2=x.shape
+    m = x.cummax(-1)[...,None]
+    x_expand = x.unsqueeze(1).expand(d1,d2,last_dim)
+    ret = (x_expand-m).exp().tril().sum(-1).log() + m.view(d1,d2)
+    ret = ret.reshape(*initial_shape)
+    ret = ret.transpose(axis,-1)
+    return ret
 
   def argmax(self, axis=None, keepdim=False):
     """
